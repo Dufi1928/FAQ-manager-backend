@@ -9,6 +9,10 @@ from .serializers import PlanSerializer, SubscriptionSerializer
 from faq_app.authentication import Shop
 import shopify
 import os
+import ssl
+import json
+# BYPASS SSL VERIFICATION FOR DEV - Fixes [SSL: CERTIFICATE_VERIFY_FAILED]
+ssl._create_default_https_context = ssl._create_unverified_context
 
 class PlanViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Plan.objects.filter(is_active=True)
@@ -88,10 +92,22 @@ class SubscriptionViewSet(viewsets.ViewSet):
             
             test_mode = True # Always True for Dev/Freelance request context
             
+            # Extract billing interval from request ('monthly' or 'annual')
+            billing_interval = request.data.get('billing_interval', 'monthly')
+            
             price_amount = float(plan.price)
             if price_amount <= 0:
                  # Should not happen given current plans, but if free tier re-introduced:
                  return Response({"error": "Cannot bill 0 amount"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Calculate final price based on interval
+            # Annual = 11 months (1 free month discount)
+            if billing_interval == 'annual':
+                final_price = price_amount * 11
+                shopify_interval = "ANNUAL"
+            else:
+                final_price = price_amount
+                shopify_interval = "EVERY_30_DAYS"
 
             variables = {
                 "name": f"{plan.name} Plan",
@@ -101,10 +117,10 @@ class SubscriptionViewSet(viewsets.ViewSet):
                     "plan": {
                         "appRecurringPricingDetails": {
                             "price": {
-                                "amount": price_amount,
-                                "currencyCode": "USD" # Assuming USD. If EUR needed, adjust.
+                                "amount": final_price,
+                                "currencyCode": plan.currency or "EUR"
                             },
-                             "interval": "EVERY_30_DAYS"
+                             "interval": shopify_interval
                         }
                     }
                 }]
@@ -113,7 +129,7 @@ class SubscriptionViewSet(viewsets.ViewSet):
             # Execute
             client = shopify.GraphQL()
             result = client.execute(query, variables)
-            data =  shopify.json.loads(result)
+            data =  json.loads(result)
             
             if 'errors' in data:
                  return Response({"error": "GraphQL Error", "details": data['errors']}, status=status.HTTP_400_BAD_REQUEST)
@@ -243,7 +259,7 @@ class SubscriptionViewSet(viewsets.ViewSet):
             
             client = shopify.GraphQL()
             result = client.execute(query, {"id": gid})
-            data = shopify.json.loads(result)
+            data = json.loads(result)
             
             if 'data' not in data or not data['data']['node']:
                  # Try adding/removing gid prefix if mismatch? 

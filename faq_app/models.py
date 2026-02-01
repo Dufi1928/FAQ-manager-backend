@@ -196,6 +196,15 @@ class FAQDesign(models.Model):
     
     # Content
     title = models.CharField(max_length=200, default="Questions Fréquentes", help_text="Title of the FAQ section")
+    
+    # Layout Model
+    LAYOUT_CHOICES = [
+        ('classic', 'Accordéon Classique'),
+        ('modern', 'Accordéon Moderne'),
+        ('minimal', 'Liste Minimaliste'),
+        ('cards', 'Grille de Cartes'),
+    ]
+    layout_model = models.CharField(max_length=50, choices=LAYOUT_CHOICES, default='classic')
 
     # Colors
     question_color = models.CharField(max_length=20, default="#1e293b")

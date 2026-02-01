@@ -44,7 +44,7 @@ class FAQDesignSerializer(serializers.ModelSerializer):
     class Meta:
         model = FAQDesign
         fields = [
-            'id', 'title', 
+            'id', 'title', 'layout_model',
             'question_color', 'answer_color', 'background_color', 'border_color',
             'font_family', 'font_size', 'border_radius',
             'question_icon_text', 'answer_icon_text',
