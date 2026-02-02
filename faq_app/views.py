@@ -54,8 +54,22 @@ class ProductViewSet(viewsets.ModelViewSet):
         shop_domain = shop.shop_domain
         access_token = shop.shopify_access_token_encrypted # TODO: Decrypt if needed
         
+        # Check active subscription to determine product limit
+        product_limit = 1
+        try:
+             # NEW LOGIC FOR FOREIGNKEY
+             active_subscription = shop.subscriptions.filter(status='active').order_by('-created_at').first()
+             
+             if active_subscription and active_subscription.plan:
+                  product_limit = active_subscription.plan.features.get('products_limit', 250)
+             else:
+                  product_limit = 1 # Free tier limit updated to 1
+        except Exception as e:
+             print(f"Sync subscription check error: {e}")
+             product_limit = 1
+
         # 1. Fetch products from Shopify
-        url = f"https://{shop_domain}/admin/api/2024-01/products.json?limit=250" # Limit 250 for now
+        url = f"https://{shop_domain}/admin/api/2024-01/products.json?limit={product_limit}"
         headers = {
             "X-Shopify-Access-Token": access_token,
             "Content-Type": "application/json"
@@ -147,28 +161,17 @@ class FAQViewSet(viewsets.ModelViewSet):
         
         # Check subscription limits
         try:
-            subscription = getattr(shop, 'subscription', None)
-            if not subscription or subscription.status != 'active':
-                 return Response({"error": "Active subscription required"}, status=status.HTTP_403_FORBIDDEN)
+            max_ai_questions = 3 # Default Free limit
             
-            features = subscription.plan.features
-            max_products = features.get('max_products', 5)
-            max_ai_questions = features.get('max_ai_questions', 5)
+            active_subscription = shop.subscriptions.filter(status='active').order_by('-created_at').first()
+            if active_subscription and active_subscription.plan:
+                 features = active_subscription.plan.features
+                 max_ai_questions = features.get('max_ai_questions', 3)
             
-            # Count products with active FAQs
-            current_usage = Product.objects.filter(shop=shop, faqs__is_active=True).distinct().count()
-            
-            if current_usage >= max_products:
-                 return Response({
-                     "error": "Plan limit reached", 
-                     "message": f"You have reached the limit of {max_products} products for your current plan. Please upgrade."
-                 }, status=status.HTTP_403_FORBIDDEN)
-                 
         except Exception as e:
-             print(f"Subscription check error: {e}")
+             return Response({"error": f"Subscription check failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         try:
-            shop = request.user
             product = Product.objects.get(shop=shop, shopify_id=product_id)
             
             # Get API Config
@@ -235,6 +238,18 @@ class FAQViewSet(viewsets.ModelViewSet):
                 faq.num_questions = len(valid_faqs_fr)
                 faq.save()
             
+            # Log generation success
+            try:
+                ActivityLog.objects.create(
+                    id=str(os.urandom(16).hex()),
+                    shop=shop,
+                    level='success',
+                    operation='generate_faq',
+                    message=f"Generated {len(valid_faqs_fr)} questions for product '{product.title}'."
+                )
+            except Exception as e:
+                print(f"Log creation failed: {e}")
+
             return Response({
                 "status": "success", 
                 "faq_id": faq.id, 
@@ -267,7 +282,7 @@ class ActivityLogViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         if not self.request.user.is_authenticated:
             return ActivityLog.objects.none()
-        return ActivityLog.objects.filter(shop=self.request.user)
+        return ActivityLog.objects.filter(shop=self.request.user).order_by('-timestamp')
 
     @action(detail=False, methods=['delete'])
     def clear(self, request):
@@ -280,8 +295,8 @@ class ActivityLogViewSet(viewsets.ModelViewSet):
         """
         Get summary stats for logs.
         """
-        # Simple aggregation
-        stats = self.get_queryset().values('level').annotate(count=Count('level'))
+        # Simple aggregation - Clear ordering to fix group by
+        stats = self.get_queryset().order_by().values('level').annotate(count=Count('level'))
         
         # Format: { level_counts: { success: 10, error: 2, ... } }
         data = { "level_counts": {} }

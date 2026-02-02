@@ -32,11 +32,18 @@ class SubscriptionViewSet(viewsets.ViewSet):
             return Response({"error": "Authentication required"}, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
-            subscription = Subscription.objects.get(shop=shop)
+            subscription = Subscription.objects.filter(
+                shop=shop,
+                status='active'
+            ).order_by('-created_at').select_related('plan').first()
+            
+            if not subscription:
+                return Response(None, status=status.HTTP_204_NO_CONTENT)
+                
             serializer = SubscriptionSerializer(subscription)
             return Response(serializer.data)
-        except Subscription.DoesNotExist:
-            return Response(None, status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # Keep list for admin debugging or history if needed, but 'current' is the main one.
     def list(self, request):
@@ -66,24 +73,54 @@ class SubscriptionViewSet(viewsets.ViewSet):
         shopify.ShopifyResource.activate_session(session)
         
         try:
+            # Check for existing active subscription to determine replacement behavior
+            existing_sub = None
+            replacement_behavior = None
+            
+            try:
+                existing_sub = Subscription.objects.get(shop=shop, status='active')
+            except Subscription.DoesNotExist:
+                pass
+            
+            # Determine replacement behavior based on price comparison
+            if existing_sub:
+                current_price = float(existing_sub.plan.price)
+                new_price = float(plan.price)
+                
+                if new_price > current_price:
+                    # Upgrade: apply immediately with automatic proration
+                    replacement_behavior = "APPLY_IMMEDIATELY"
+                    print(f"[SUBSCRIBE] Upgrade detected: {existing_sub.plan.name} (${current_price}) → {plan.name} (${new_price})")
+                    print(f"[SUBSCRIBE] Using APPLY_IMMEDIATELY - Shopify will prorate automatically")
+                elif new_price < current_price:
+                    # Downgrade: apply at next billing cycle
+                    replacement_behavior = "APPLY_ON_NEXT_BILLING_CYCLE"
+                    print(f"[SUBSCRIBE] Downgrade detected: {existing_sub.plan.name} (${current_price}) → {plan.name} (${new_price})")
+                    print(f"[SUBSCRIBE] Using APPLY_ON_NEXT_BILLING_CYCLE - will activate at period end")
+                else:
+                    # Same price (e.g., interval change)
+                    replacement_behavior = "APPLY_IMMEDIATELY"
+            
             # 2. Construct Return URL
             host_url = os.environ.get('APP_URL') or request.build_absolute_uri('/')[:-1]
             if 'ngrok' in host_url or 'trycloudflare' in host_url:
                  if not host_url.startswith('https'):
                       host_url = host_url.replace('http', 'https')
     
-            return_url = f"{host_url}/api/subscriptions/callback/?plan_id={plan.id}"
+            return_url = f"{host_url}/api/subscriptions/callback/?plan_id={plan.id}&shop={shop_domain}"
             
-            # 3. GraphQL Mutation
+            # 3. GraphQL Mutation with replacementBehavior
             query = """
-            mutation AppSubscriptionCreate($name: String!, $lineItems: [AppSubscriptionLineItemInput!]!, $returnUrl: URL!, $test: Boolean) {
-              appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test) {
+            mutation AppSubscriptionCreate($name: String!, $lineItems: [AppSubscriptionLineItemInput!]!, $returnUrl: URL!, $test: Boolean, $replacementBehavior: AppSubscriptionReplacementBehavior) {
+              appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test, replacementBehavior: $replacementBehavior) {
                 userErrors {
                   field
                   message
                 }
                 appSubscription {
                   id
+                  status
+                  currentPeriodEnd
                 }
                 confirmationUrl
               }
@@ -126,6 +163,11 @@ class SubscriptionViewSet(viewsets.ViewSet):
                 }]
             }
             
+            # Add replacementBehavior if there's an existing subscription
+            if replacement_behavior:
+                variables["replacementBehavior"] = replacement_behavior
+                print(f"[SUBSCRIBE] Adding replacementBehavior: {replacement_behavior}")
+            
             # Execute
             client = shopify.GraphQL()
             result = client.execute(query, variables)
@@ -145,13 +187,12 @@ class SubscriptionViewSet(viewsets.ViewSet):
             
             # 4. Save Pending Subscription
             # We store the GID as shopify_charge_id
-            Subscription.objects.update_or_create(
+            # CHANGE: Use create() instead of update_or_create to avoid overwriting active subscription
+            Subscription.objects.create(
                 shop=shop,
-                defaults={
-                    'plan': plan,
-                    'shopify_charge_id': subscription_gid,
-                    'status': 'pending'
-                }
+                plan=plan,
+                shopify_charge_id=subscription_gid,
+                status='pending'
             )
             
             return Response({"confirmation_url": confirmation_url})
@@ -220,21 +261,44 @@ class SubscriptionViewSet(viewsets.ViewSet):
              shopify.ShopifyResource.clear_session()
 
 
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'], permission_classes=[])
     def callback(self, request):
         """
-        Handle callback from Shopify.
+        Handle callback from Shopify after subscription approval.
+        This is called by Shopify directly, not by authenticated user.
         """
-        shop = request.user
         
-        # 1. Find pending subscription
+        # Get shop from URL parameters (not from request.user)
+        shop_domain = request.GET.get('shop')
+        charge_id = request.GET.get('charge_id') # Shopify sends this
+        print(f"[CALLBACK] Received callback for shop: {shop_domain}, charge_id: {charge_id}")
+        
+        if not shop_domain:
+            return Response({"error": "Missing shop parameter"}, status=status.HTTP_400_BAD_REQUEST)
+        
         try:
-             # Get the most recent pending or active (status might have updated?)
-             sub = Subscription.objects.filter(shop=shop).order_by('-updated_at').first()
-             if not sub or not sub.shopify_charge_id:
-                  return Response({"error": "No pending subscription found"}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception:
-             return Response({"error": "Database error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            from faq_app.models import Shop
+            shop = Shop.objects.get(shop_domain=shop_domain)
+            print(f"[CALLBACK] Found shop in database: {shop.id}")
+        except Shop.DoesNotExist:
+            print(f"[CALLBACK] ERROR: Shop not found: {shop_domain}")
+            return Response({"error": "Shop not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        # 1. Find subscription by charge_id first so we get the exact one
+        sub = None
+        if charge_id:
+            # Try exact match or match with GID prefix
+            sub = Subscription.objects.filter(shop=shop, shopify_charge_id__endswith=charge_id).first()
+        
+        # Fallback to most recent if not found by ID (legacy behavior)
+        if not sub:
+             sub = Subscription.objects.filter(shop=shop).order_by('-created_at').first()
+             
+        if not sub:
+              print(f"[CALLBACK] ERROR: No subscription found")
+              return Response({"error": "No subscription found"}, status=status.HTTP_400_BAD_REQUEST)
+              
+        print(f"[CALLBACK] Found subscription ID: {sub.id}, status: {sub.status}, charge_id: {sub.shopify_charge_id}")
 
         # 2. Verify status on Shopify via GraphQL
         shop_domain = shop.shop_domain
@@ -261,25 +325,30 @@ class SubscriptionViewSet(viewsets.ViewSet):
             result = client.execute(query, {"id": gid})
             data = json.loads(result)
             
+            print(f"[CALLBACK] Shopify GraphQL response: {data}")
+            
             if 'data' not in data or not data['data']['node']:
-                 # Try adding/removing gid prefix if mismatch? 
-                 # But we stored exactly what create returned.
+                 print(f"[CALLBACK] ERROR: Subscription not found on Shopify")
                  return Response({"error": "Subscription not found on Shopify"}, status=status.HTTP_404_NOT_FOUND)
             
             status_value = data['data']['node']['status']
+            print(f"[CALLBACK] Shopify subscription status: {status_value}")
             
             if status_value == 'ACTIVE':
                  sub.status = 'active'
                  sub.activated_on = timezone.now()
                  sub.save()
+                 print(f"[CALLBACK] ✓ Subscription activated! ID: {sub.id}")
                  
                  store_name = shop_domain.replace('.myshopify.com', '')
-                 # Using the valid app handle found in shopify.app.toml
-                 frontend_url = f"https://admin.shopify.com/store/{store_name}/apps/faq-app-frontend/app/pricing" 
+                 # Redirect to products page after successful subscription
+                 frontend_url = f"https://admin.shopify.com/store/{store_name}/apps/faq-manager-v1/app/products" 
                  
                  import django.shortcuts
                  return django.shortcuts.redirect(frontend_url)
-            
+            else:
+                 print(f"[CALLBACK] Subscription status is {status_value}, not activating")
+             
             return Response({"error": f"Subscription status is {status_value}"})
             
         except Exception as e:

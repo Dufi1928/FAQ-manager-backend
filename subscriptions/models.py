@@ -31,7 +31,7 @@ class Subscription(models.Model):
         ('pending', 'Pending'), # Waiting for approval
     ]
 
-    shop = models.OneToOneField(Shop, on_delete=models.CASCADE, related_name='subscription')
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name='subscriptions')
     plan = models.ForeignKey(Plan, on_delete=models.PROTECT, related_name='subscriptions')
     
     shopify_charge_id = models.CharField(max_length=50, null=True, blank=True) # RecurringApplicationCharge ID
@@ -39,6 +39,10 @@ class Subscription(models.Model):
     
     activated_on = models.DateTimeField(null=True, blank=True)
     current_period_end = models.DateTimeField(null=True, blank=True) # For tracking billing cycles if needed
+    
+    # Pending downgrade tracking
+    pending_plan = models.ForeignKey(Plan, on_delete=models.SET_NULL, null=True, blank=True, related_name='pending_subscriptions', help_text="Plan scheduled to activate at end of current period")
+    pending_effective_date = models.DateTimeField(null=True, blank=True, help_text="When the pending plan will become active")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

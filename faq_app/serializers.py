@@ -59,8 +59,9 @@ class FAQDesignSerializer(serializers.ModelSerializer):
     def get_plan_features(self, obj):
         try:
             # Check if shop has an active subscription
-            subscription = getattr(obj.shop, 'subscription', None)
-            if subscription and subscription.status == 'active':
+            # Use subscriptions manager and filter for active status (due to ForeignKey change)
+            subscription = obj.shop.subscriptions.filter(status='active').first()
+            if subscription:
                 return subscription.plan.features
             
             # Default to Free plan features if no active subscription found
