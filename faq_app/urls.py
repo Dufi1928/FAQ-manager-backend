@@ -3,7 +3,8 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ShopViewSet, ProductViewSet, FAQViewSet, 
     ActivityLogViewSet, ConfigViewSet, HealthCheckView,
-    SyncAuthView, FAQDesignViewSet, UninstallShopView
+    SyncAuthView, FAQDesignViewSet, UninstallShopView,
+    BulkActionViewSet
 )
 
 from .views_storefront import StorefrontFAQView, StorefrontProductSearchView
@@ -15,6 +16,7 @@ router.register(r'faq', FAQViewSet)
 router.register(r'logs', ActivityLogViewSet)
 router.register(r'config', ConfigViewSet, basename='config')
 router.register(r'design', FAQDesignViewSet, basename='design')
+router.register(r'bulk', BulkActionViewSet, basename='bulk')
 
 urlpatterns = [
     path('health/', HealthCheckView.as_view(), name='health config'),

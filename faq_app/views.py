@@ -148,7 +148,9 @@ class FAQViewSet(viewsets.ModelViewSet):
             
         return queryset
 
-    @action(detail=False, methods=['post'], url_path='generate-faq')
+
+
+
     def generate_faq(self, request):
         """
         Generate FAQ for a specific product.
@@ -544,3 +546,115 @@ class FAQDesignViewSet(viewsets.GenericViewSet, generics.RetrieveUpdateAPIView):
             )
         else:
             serializer.save()
+
+from .models import Shop, Product, FAQ, ActivityLog, APIConfiguration, WebhookRegistration, FAQDesign, BulkGenerationJob
+from .services.bulk_service import BulkFAQGenerator
+
+class BulkActionViewSet(viewsets.ViewSet):
+    """
+    Manage Bulk FAQ Generation Jobs.
+    """
+    authentication_classes = [ShopifyAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=['post'])
+    def start(self, request):
+        shop = request.user
+        mode = request.data.get('mode', 'MISSING_ONLY')
+        
+        # Check if active job exists
+        active_job = BulkGenerationJob.objects.filter(
+            shop=shop, 
+            status__in=['PENDING', 'RUNNING']
+        ).first()
+        
+        if active_job:
+            return Response(
+                {"error": "A bulk job is already running"},
+                status=status.HTTP_409_CONFLICT
+            )
+            
+        # Check Plan Restriction
+        active_sub = shop.subscriptions.filter(status='active').order_by('-created_at').first()
+        plan_name = active_sub.plan.name if active_sub and active_sub.plan else "Free"
+        
+        if plan_name != "Unlimited":
+             return Response(
+                {"error": "Bulk generation is restricted to the Unlimited plan."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+            
+        # Create Job
+        # Count target products roughly
+        total_qs = Product.objects.filter(shop=shop)
+        if mode == 'MISSING_ONLY':
+            total_qs = total_qs.filter(has_faq=False)
+        
+        count = total_qs.count()
+        if count == 0:
+             return Response(
+                {"error": "No products match criteria"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        job = BulkGenerationJob.objects.create(
+            shop=shop,
+            mode=mode,
+            total_products=count,
+            status='PENDING'
+        )
+        
+        # Start Thread
+        try:
+            thread = BulkFAQGenerator(job.id)
+            thread.start()
+        except Exception as e:
+            job.status = 'FAILED'
+            job.error_message = f"Failed to start thread: {e}"
+            job.save()
+            return Response({"error": str(e)}, status=500)
+            
+        return Response({
+            "status": "started",
+            "job_id": job.id,
+            "total_products": count
+        })
+
+    @action(detail=False, methods=['post'])
+    def cancel(self, request):
+        shop = request.user
+        
+        active_job = BulkGenerationJob.objects.filter(
+            shop=shop, 
+            status__in=['PENDING', 'RUNNING']
+        ).first()
+        
+        if not active_job:
+            return Response({"error": "No active job to cancel"}, status=404)
+            
+        active_job.status = 'CANCELLED'
+        active_job.save()
+        
+        return Response({"status": "cancelled"})
+
+    @action(detail=False, methods=['get'])
+    def status(self, request):
+        shop = request.user
+        
+        # Get latest job
+        job = BulkGenerationJob.objects.filter(shop=shop).order_by('-created_at').first()
+        
+        if not job:
+            return Response({"status": "none"})
+            
+        return Response({
+            "id": job.id,
+            "status": job.status,
+            "mode": job.mode,
+            "total_products": job.total_products,
+            "processed_products": job.processed_products,
+            "progress": (job.processed_products / job.total_products * 100) if job.total_products > 0 else 0,
+            "current_product": job.current_product_title,
+            "created_at": job.created_at,
+            "error_message": job.error_message
+        })

@@ -235,3 +235,42 @@ class FAQDesign(models.Model):
 
     class Meta:
         db_table = 'faq_designs'
+
+
+class BulkGenerationJob(models.Model):
+    """
+    Tracks async background job stats for FAQ generation.
+    """
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('RUNNING', 'Running'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+        ('FAILED', 'Failed')
+    ]
+    
+    MODE_CHOICES = [
+        ('ALL', 'For all products'),
+        ('MISSING_ONLY', 'Only products without FAQs')
+    ]
+
+    shop = models.OneToOneField(Shop, on_delete=models.CASCADE, related_name='bulk_job')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING', db_index=True)
+    
+    total_products = models.IntegerField(default=0)
+    processed_products = models.IntegerField(default=0)
+    
+    mode = models.CharField(max_length=20, choices=MODE_CHOICES, default='MISSING_ONLY')
+    
+    current_product_title = models.CharField(max_length=255, null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Job for {self.shop.shop_domain} ({self.status})"
+
+    class Meta:
+        db_table = 'bulk_generation_jobs'

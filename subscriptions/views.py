@@ -34,7 +34,7 @@ class SubscriptionViewSet(viewsets.ViewSet):
         try:
             subscription = Subscription.objects.filter(
                 shop=shop,
-                status='active'
+                status__iexact='active'
             ).order_by('-created_at').select_related('plan').first()
             
             if not subscription:
@@ -77,10 +77,14 @@ class SubscriptionViewSet(viewsets.ViewSet):
             existing_sub = None
             replacement_behavior = None
             
-            try:
-                existing_sub = Subscription.objects.get(shop=shop, status='active')
-            except Subscription.DoesNotExist:
-                pass
+            # Get existing active subscription (safe, takes latest if multiple, case-insensitive)
+            existing_sub = Subscription.objects.filter(shop=shop, status__iexact='active').order_by('-created_at').first()
+            
+            print(f"[SUBSCRIBE] Plan requested: {plan.name}, ID: {plan.id}, Price: {plan.price}")
+            if existing_sub:
+                 print(f"[SUBSCRIBE] Found existing active sub: {existing_sub.id} - Plan: {existing_sub.plan.name} - Price: {existing_sub.plan.price}")
+            else:
+                 print(f"[SUBSCRIBE] No existing active subscription found in DB for shop {shop.shop_domain}")
             
             # Determine replacement behavior based on price comparison
             if existing_sub:
@@ -210,9 +214,8 @@ class SubscriptionViewSet(viewsets.ViewSet):
         Cancel the current subscription.
         """
         shop = request.user
-        try:
-            sub = Subscription.objects.get(shop=shop, status='active')
-        except Subscription.DoesNotExist:
+        sub = Subscription.objects.filter(shop=shop, status__iexact='active').order_by('-created_at').first()
+        if not sub:
              return Response({"error": "No active subscription to cancel"}, status=status.HTTP_400_BAD_REQUEST)
         
         # Internal cleanup only if no charge ID or free tier logic (if we had one)
