@@ -50,11 +50,22 @@ class FAQDesignSerializer(serializers.ModelSerializer):
             'question_icon_text', 'answer_icon_text',
             'question_icon_bg', 'question_icon_color',
             'answer_icon_bg', 'answer_icon_color',
-            'custom_css', 'plan_features'
+            'custom_css', 'plan_features', 'plan_name'
         ]
         read_only_fields = ['id']
 
     plan_features = serializers.SerializerMethodField()
+    plan_name = serializers.SerializerMethodField()
+
+    def get_plan_name(self, obj):
+        try:
+             # Use case-insensitive filter, fallback to highest price
+             subscription = obj.shop.subscriptions.filter(status__iexact='active').order_by('-plan__price', '-created_at').first()
+             if subscription:
+                 return subscription.plan.name
+             return "Free"
+        except Exception:
+             return "Free"
 
     def get_plan_features(self, obj):
         try:

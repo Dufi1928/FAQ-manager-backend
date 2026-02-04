@@ -36,8 +36,9 @@ class ProductViewSet(viewsets.ModelViewSet):
     serializer_class = ProductSerializer
     authentication_classes = [ShopifyAuthentication]
     permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['title', 'handle', 'vendor']
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
+    filterset_fields = ['has_faq']
+    search_fields = ['title', 'handle', 'vendor', 'shopify_id']
     ordering_fields = ['created_at', 'updated_at', 'title']
 
     def get_queryset(self):
@@ -333,9 +334,9 @@ class APIConfigurationViewSet(viewsets.ModelViewSet):
             'use_default_keys': True
         })
         
-        # Check Plan
+        # Check Plan: Prioritize highest price if multiple active (overlap handling)
         plan_name = "Gratuit"
-        subscription = getattr(shop, 'subscription', None)
+        subscription = shop.subscriptions.filter(status__iexact='active').order_by('-plan__price', '-created_at').first()
         if subscription and subscription.plan:
              plan_name = subscription.plan.name
         
@@ -513,9 +514,10 @@ class FAQDesignViewSet(viewsets.GenericViewSet, generics.RetrieveUpdateAPIView):
         
         # Inject plan name
         data = serializer.data
+        # Inject plan name - Prioritize expensive
         shop = request.user
         plan_name = "Gratuit"
-        subscription = getattr(shop, 'subscription', None)
+        subscription = shop.subscriptions.filter(status__iexact='active').order_by('-plan__price', '-created_at').first()
         if subscription and subscription.plan:
              plan_name = subscription.plan.name
         
@@ -529,8 +531,8 @@ class FAQDesignViewSet(viewsets.GenericViewSet, generics.RetrieveUpdateAPIView):
     def perform_update(self, serializer):
         shop = self.request.user
         
-        # Check subscription status
-        subscription = getattr(shop, 'subscription', None)
+        # Check subscription status - Prioritize expensive
+        subscription = shop.subscriptions.filter(status__iexact='active').order_by('-plan__price', '-created_at').first()
         can_customize = False
         if subscription and subscription.status == 'active':
             features = subscription.plan.features

@@ -35,13 +35,40 @@ class SubscriptionViewSet(viewsets.ViewSet):
             subscription = Subscription.objects.filter(
                 shop=shop,
                 status__iexact='active'
-            ).order_by('-created_at').select_related('plan').first()
+            ).order_by('-plan__price', '-created_at').select_related('plan').first()
+            
+            # DEBUG: Print all subs to understand why access is lost
+            all_subs = Subscription.objects.filter(shop=shop).order_by('-created_at')
+            print(f"[CURRENT_DEBUG] Shop: {shop.shop_domain}")
+            for s in all_subs:
+                print(f" - ID: {s.id}, Plan: {s.plan.name}, Status: {s.status}, Created: {s.created_at}")
             
             if not subscription:
                 return Response(None, status=status.HTTP_204_NO_CONTENT)
                 
+            # Determine if there is a pending downgrade or overlapping plan
+            pending_downgrade_plan = None
+            
+            # 1. Check for overlapping active plan (lower price)
+            active_subs = Subscription.objects.filter(shop=shop, status__iexact='active').order_by('-plan__price', '-created_at')
+            if active_subs.count() > 1:
+                # The first one is 'current' (highest price), the second is likely the downgrade
+                pending_downgrade_plan = active_subs[1].plan.name
+            
+            # 2. Check for pending subscription created AFTER the current active one
+            if not pending_downgrade_plan and subscription:
+                pending_sub = Subscription.objects.filter(
+                    shop=shop, 
+                    status='pending', 
+                    created_at__gt=subscription.created_at
+                ).order_by('-created_at').first()
+                if pending_sub:
+                    pending_downgrade_plan = pending_sub.plan.name
+
             serializer = SubscriptionSerializer(subscription)
-            return Response(serializer.data)
+            data = serializer.data
+            data['pending_downgrade_plan'] = pending_downgrade_plan
+            return Response(data)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
