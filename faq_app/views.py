@@ -558,6 +558,27 @@ class FAQDesignViewSet(viewsets.GenericViewSet, generics.RetrieveUpdateAPIView):
         
         return Response(data)
 
+    def update(self, request, *args, **kwargs):
+        print(f"[{timezone.now()}] [FAQDesignViewSet] Update request received for {request.user}")
+        print(f"[{timezone.now()}] [FAQDesignViewSet] Data: {request.data}")
+        
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        
+        if not serializer.is_valid():
+             print(f"[{timezone.now()}] [FAQDesignViewSet] Validation Errors: {serializer.errors}")
+             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        self.perform_update(serializer)
+
+        if getattr(instance, '_prefetched_objects_cache', None):
+            # If 'prefetch_related' has been applied to a queryset, we need to
+            # forcibly invalidate the prefetch cache on the instance.
+            instance._prefetched_objects_cache = {}
+
+        return Response(serializer.data)
+
     def perform_update(self, serializer):
         shop = self.request.user
         
