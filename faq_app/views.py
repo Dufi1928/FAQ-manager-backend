@@ -49,7 +49,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def sync(self, request):
         """
-        Trigger manual product sync from Shopify.
+        Trigger manual product sync from Shopify with pagination support.
         """
         shop = request.user
         shop_domain = shop.shop_domain
@@ -69,22 +69,33 @@ class ProductViewSet(viewsets.ModelViewSet):
              print(f"Sync subscription check error: {e}")
              product_limit = 1
 
-        # 1. Fetch products from Shopify
-        url = f"https://{shop_domain}/admin/api/2024-01/products.json?limit={product_limit}"
+        # Pagination Logic
+        products_synced_count = 0
+        created_count = 0
+        updated_count = 0
+        
+        url = f"https://{shop_domain}/admin/api/2024-01/products.json?limit=250" # Max allowed by Shopify per page
         headers = {
             "X-Shopify-Access-Token": access_token,
             "Content-Type": "application/json"
         }
         
-        try:
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
+        while url and products_synced_count < product_limit:
+            try:
+                response = requests.get(url, headers=headers)
+                
+                if response.status_code != 200:
+                    return Response({"error": "Shopify API Error", "details": response.text}, status=status.HTTP_400_BAD_REQUEST)
+                
                 products_data = response.json().get('products', [])
-                
-                created_count = 0
-                updated_count = 0
-                
+                if not products_data:
+                    break
+                    
+                # Process current page
                 for p_data in products_data:
+                    if products_synced_count >= product_limit:
+                        break
+                        
                     # Extract image URL from Shopify product data
                     image_url = None
                     if p_data.get('images') and len(p_data['images']) > 0:
@@ -105,26 +116,44 @@ class ProductViewSet(viewsets.ModelViewSet):
                             'last_synced_at': timezone.now()
                         }
                     )
+                    
                     if created:
                         created_count += 1
                     else:
                         updated_count += 1
                         
-                # Log success
-                ActivityLog.objects.create(
-                    id=str(os.urandom(16).hex()), # Simple ID generation
-                    shop=shop,
-                    level='success',
-                    operation='manual_sync',
-                    message=f"Synced {len(products_data)} products ({created_count} new, {updated_count} updated)."
-                )
+                    products_synced_count += 1
                 
-                return Response({"status": "success", "count": len(products_data)})
-            else:
-                return Response({"error": "Shopify API Error", "details": response.text}, status=status.HTTP_400_BAD_REQUEST)
+                # Check for next page
+                link_header = response.headers.get('Link')
+                if not link_header:
+                    break
+                    
+                # Parse Link header to get next URL
+                # Example: <https://shop.myshopify.com/...>; rel="next", <https://shop.myshopify.com/...>; rel="previous"
+                links = link_header.split(',')
+                next_url = None
+                for link in links:
+                    if 'rel="next"' in link:
+                        next_url = link.split(';')[0].strip('<> ')
+                        break
                 
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                url = next_url
+                
+            except Exception as e:
+                print(f"Sync error loop: {e}")
+                return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Log success
+        ActivityLog.objects.create(
+            id=str(os.urandom(16).hex()),
+            shop=shop,
+            level='success',
+            operation='manual_sync',
+            message=f"Synced {products_synced_count} products ({created_count} new, {updated_count} updated). Limit was {product_limit}."
+        )
+        
+        return Response({"status": "success", "count": products_synced_count})
 
 
 class FAQViewSet(viewsets.ModelViewSet):
