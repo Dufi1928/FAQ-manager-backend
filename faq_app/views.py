@@ -181,6 +181,7 @@ class FAQViewSet(viewsets.ModelViewSet):
 
 
 
+    @action(detail=False, methods=['post'], url_path='generate-faq')
     def generate_faq(self, request):
         """
         Generate FAQ for a specific product.
