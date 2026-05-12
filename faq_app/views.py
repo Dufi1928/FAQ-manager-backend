@@ -10,11 +10,12 @@ import os
 
 from .models import Shop, Product, FAQ, ActivityLog, APIConfiguration, WebhookRegistration, FAQDesign
 from .serializers import (
-    ShopSerializer, ProductSerializer, FAQSerializer, 
-    ActivityLogSerializer, APIConfigurationSerializer, 
+    ShopSerializer, ProductSerializer, FAQSerializer,
+    ActivityLogSerializer, APIConfigurationSerializer,
     WebhookRegistrationSerializer, FAQDesignSerializer
 )
 from .authentication import ShopifyAuthentication
+from .services.theme_service import detect_design_from_theme
 
 class ShopViewSet(viewsets.ModelViewSet):
     queryset = Shop.objects.all()
@@ -579,16 +580,36 @@ class FAQDesignViewSet(viewsets.GenericViewSet, generics.RetrieveUpdateAPIView):
 
         return Response(serializer.data)
 
+    @action(detail=False, methods=['post'], url_path='auto-detect')
+    def auto_detect(self, request):
+        """
+        Analyse le thème Shopify actif via Claude et retourne une suggestion
+        de design pour la FAQ. Ne sauvegarde rien — c'est une preview.
+        """
+        shop = request.user
+        result = detect_design_from_theme(
+            shop_domain=shop.shop_domain,
+            access_token=shop.shopify_access_token_encrypted,
+        )
+
+        if "error" in result:
+            return Response({"error": result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result, status=status.HTTP_200_OK)
+
     def perform_update(self, serializer):
         shop = self.request.user
-        
+
         # Check subscription status - Prioritize expensive
         subscription = shop.subscriptions.filter(status__iexact='active').order_by('-plan__price', '-created_at').first()
         can_customize = False
-        if subscription and subscription.status == 'active':
-            features = subscription.plan.features
-            if isinstance(features, dict):
-                can_customize = features.get('design_customization', False)
+        if subscription and subscription.status.lower() == 'active':
+            if subscription.plan.name == 'Unlimited':
+                can_customize = True
+            else:
+                features = subscription.plan.features
+                if isinstance(features, dict):
+                    can_customize = features.get('design_customization', False)
         
         # If not allowed to customize, revert premium fields to defaults
         if not can_customize:
